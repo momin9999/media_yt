@@ -4,11 +4,17 @@ import subprocess
 import requests
 import json
 from flask import Flask, request, jsonify
+from flask_cors import CORS # CORSライブラリをインポート
 from tempfile import TemporaryDirectory
 import logging
 
 # Flaskアプリケーションの初期化
 app = Flask(__name__)
+
+# CORS設定を追加
+# これにより、全てのドメインからのリクエストを許可します。
+# より厳密にする場合は、origins=["https://your-domain.com"] のように指定します。
+CORS(app) 
 
 # ログ設定
 logging.basicConfig(level=logging.INFO)
@@ -23,14 +29,13 @@ def create_error_response(message, status_code):
     app.logger.error(message)
     return jsonify({'status': 'error', 'message': message}), status_code
 
-# --- APIエンドポイント ---
+# --- APIエンドポイント (変更なし、ただしCORSが適用される) ---
 
 @app.route('/update', methods=['POST'])
 def update_yt_dlp():
     """
     yt-dlpパッケージを最新バージョンにアップデートするエンドポイント
     """
-    # APIキーによる認証
     headers = request.headers
     request_api_key = headers.get('X-API-KEY')
     if not request_api_key or request_api_key != CONOHA_API_KEY:
@@ -38,7 +43,6 @@ def update_yt_dlp():
     
     app.logger.info("yt-dlpのアップデートを開始します...")
     try:
-        # pipを使ってyt-dlpをアップグレード
         command = [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"]
         result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
         
@@ -46,11 +50,6 @@ def update_yt_dlp():
         app.logger.info(success_message)
         return jsonify({'status': 'success', 'message': success_message})
 
-    except subprocess.TimeoutExpired:
-        return create_error_response('アップデート処理がタイムアウトしました。', 504)
-    except subprocess.CalledProcessError as e:
-        error_message = f"アップデートコマンドの実行に失敗しました。\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}"
-        return create_error_response(error_message, 500)
     except Exception as e:
         return create_error_response(f"予期せぬエラーが発生しました: {str(e)}", 500)
 
@@ -64,10 +63,9 @@ def get_formats():
     if not data or 'url' not in data:
         return create_error_response('ビデオのURLがリクエストに含まれていません。', 400)
     
-    video_url = data['url']
+    video_url = data['url'].strip()
     app.logger.info(f"フォーマット取得リクエスト: {video_url}")
 
-    # YouTubeのURLの場合、yt-dlpが正しく解釈できるようダブルクォートで囲む
     if "youtube.com" in video_url or "youtu.be" in video_url:
         final_url = f'"{video_url}"'
     else:
@@ -75,7 +73,6 @@ def get_formats():
         
     try:
         command = ['yt-dlp', '--dump-json', '--no-playlist', final_url]
-        # shell=True を使うことで、クォートされたURLを正しく解釈させる
         result = subprocess.run(' '.join(command), shell=True, check=True, capture_output=True, text=True, timeout=60)
         
         video_info = json.loads(result.stdout)
@@ -83,7 +80,6 @@ def get_formats():
         
         selectable_formats = []
         for f in formats:
-            format_note = f.get('format_note', '')
             resolution = f.get('resolution', 'audio only')
             ext = f.get('ext')
             filesize = f.get('filesize') or f.get('filesize_approx')
@@ -99,13 +95,8 @@ def get_formats():
             })
 
         return jsonify({'status': 'success', 'formats': selectable_formats})
-
-    except subprocess.TimeoutExpired:
-        return create_error_response('フォーマットの取得がタイムアウトしました。URLを確認してください。', 504)
-    except subprocess.CalledProcessError as e:
-        return create_error_response(f"yt-dlpの実行に失敗しました: {e.stderr}", 500)
     except Exception as e:
-        return create_error_response(f"予期せぬエラーが発生しました: {str(e)}", 500)
+        return create_error_response(f"yt-dlpの実行に失敗しました: {str(e)}", 500)
 
 
 @app.route('/download', methods=['POST'])
@@ -120,11 +111,10 @@ def download_video():
     if not data or 'url' not in data:
         return create_error_response('ビデオのURLがリクエストに含まれていません。', 400)
     
-    video_url = data['url']
+    video_url = data['url'].strip()
     format_id = data.get('format_id', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best')
     app.logger.info(f"ダウンロードリクエスト受信: {video_url} (Format: {format_id})")
 
-    # YouTubeのURLの場合、yt-dlpが正しく解釈できるようダブルクォートで囲む
     if "youtube.com" in video_url or "youtu.be" in video_url:
         final_url = f'"{video_url}"'
     else:
@@ -133,14 +123,7 @@ def download_video():
     with TemporaryDirectory() as temp_dir:
         try:
             output_template = f'"{os.path.join(temp_dir, "%(title)s-[%(format_id)s].%(ext)s")}"'
-            command = [
-                'yt-dlp',
-                '--no-playlist',
-                '-f', format_id,
-                '-o', output_template,
-                final_url
-            ]
-            # shell=True を使うことで、クォートされたURLと出力パスを正しく解釈させる
+            command = ['yt-dlp', '--no-playlist', '-f', format_id, '-o', output_template, final_url]
             subprocess.run(' '.join(command), shell=True, check=True, capture_output=True, text=True, timeout=1800)
             
             downloaded_files = os.listdir(temp_dir)
@@ -151,12 +134,8 @@ def download_video():
             file_path = os.path.join(temp_dir, file_name)
             app.logger.info(f"ダウンロード成功: {file_name}")
 
-        except subprocess.TimeoutExpired:
-             return create_error_response('ダウンロードがタイムアウトしました（30分以上）。より短い動画でお試しください。', 504)
-        except subprocess.CalledProcessError as e:
-            return create_error_response(f"yt-dlpの実行に失敗しました: {e.stderr}", 500)
         except Exception as e:
-            return create_error_response(f"予期せぬダウンロードエラー: {str(e)}", 500)
+            return create_error_response(f"yt-dlpの実行に失敗しました: {str(e)}", 500)
 
         try:
             app.logger.info(f"ConoHaサーバーへのアップロード開始: {file_name}")
@@ -168,15 +147,12 @@ def download_video():
 
             app.logger.info("アップロード成功")
             return jsonify(response.json()), response.status_code
-
-        except requests.exceptions.RequestException as e:
-            return create_error_response(f"ConoHaサーバーへのアップロードに失敗しました: {str(e)}", 500)
         except Exception as e:
-            return create_error_response(f"予期せぬアップロードエラー: {str(e)}", 500)
+            return create_error_response(f"ConoHaサーバーへのアップロードに失敗しました: {str(e)}", 500)
 
 @app.route('/')
 def index():
-    return "Download API is running. (v3: with update and quote)"
+    return "Download API is running. (v4: CORS enabled)"
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
